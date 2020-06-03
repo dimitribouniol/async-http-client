@@ -451,7 +451,14 @@ class HTTP1ConnectionProvider {
         let requiresTLS = self.key.scheme.requiresTLS
         let bootstrap: NIOClientTCPBootstrap
         do {
-            bootstrap = try NIOClientTCPBootstrap.makeHTTPClientBootstrapBase(on: eventLoop, host: self.key.host, port: self.key.port, requiresTLS: requiresTLS, configuration: self.configuration)
+            bootstrap = try NIOClientTCPBootstrap.makeHTTPClientBootstrapBase(
+                on: eventLoop,
+                host: key.host,
+                preferredHostname: configuration.hostnameRepresentations.resolveSNI(for: key),
+                port: key.port,
+                requiresTLS: requiresTLS,
+                configuration: configuration
+            )
         } catch {
             return eventLoop.makeFailedFuture(error)
         }
@@ -469,7 +476,7 @@ class HTTP1ConnectionProvider {
             let requiresSSLHandler = self.configuration.proxy != nil && self.key.scheme.requiresTLS
             let handshakePromise = channel.eventLoop.makePromise(of: Void.self)
 
-            channel.pipeline.addSSLHandlerIfNeeded(for: self.key, tlsConfiguration: self.configuration.tlsConfiguration, addSSLClient: requiresSSLHandler, handshakePromise: handshakePromise)
+            channel.pipeline.addSSLHandlerIfNeeded(for: self.key, configuration: self.configuration, addSSLClient: requiresSSLHandler, handshakePromise: handshakePromise)
 
             return handshakePromise.futureResult.flatMap {
                 channel.pipeline.addHTTPClientHandlers(leftOverBytesStrategy: .forwardBytes)

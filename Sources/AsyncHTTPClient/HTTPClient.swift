@@ -267,6 +267,8 @@ public class HTTPClient {
     ///     - request: HTTP request to execute.
     ///     - deadline: Point in time by which the request must complete.
     public func execute(request: Request, deadline: NIODeadline? = nil) -> EventLoopFuture<Response> {
+        var request = request
+        request.preferredHostname = configuration.hostnameRepresentations.resolveHTTPHost(for: request)
         let accumulator = ResponseAccumulator(request: request)
         return self.execute(request: request, delegate: accumulator, deadline: deadline).futureResult
     }
@@ -278,6 +280,8 @@ public class HTTPClient {
     ///     - eventLoop: NIO Event Loop preference.
     ///     - deadline: Point in time by which the request must complete.
     public func execute(request: Request, eventLoop: EventLoopPreference, deadline: NIODeadline? = nil) -> EventLoopFuture<Response> {
+        var request = request
+        request.preferredHostname = configuration.hostnameRepresentations.resolveHTTPHost(for: request)
         let accumulator = ResponseAccumulator(request: request)
         return self.execute(request: request, delegate: accumulator, eventLoop: eventLoop, deadline: deadline).futureResult
     }
@@ -377,6 +381,9 @@ public class HTTPClient {
                 }
 
                 if !isCancelled {
+                    var request = request
+                    request.preferredHostname = self.configuration.hostnameRepresentations.resolveHTTPHost(for: request)
+                    
                     return channel.writeAndFlush(request).flatMapError { _ in
                         // At this point the `TaskHandler` will already be present
                         // to handle the failure and pass it to the `promise`
@@ -443,8 +450,11 @@ public class HTTPClient {
         public var decompression: Decompression
         /// Ignore TLS unclean shutdown error, defaults to `false`.
         public var ignoreUncleanSSLShutdown: Bool
+        /// Representations for host names and socket paths for use in Host header and SNI.
+        public var hostnameRepresentations: HostnameRepresentationResolver
 
         public init(tlsConfiguration: TLSConfiguration? = nil,
+                    hostnameRepresentations: HostnameRepresentationResolver = .default,
                     redirectConfiguration: RedirectConfiguration? = nil,
                     timeout: Timeout = Timeout(),
                     maximumAllowedIdleTimeInConnectionPool: TimeAmount,
@@ -452,6 +462,7 @@ public class HTTPClient {
                     ignoreUncleanSSLShutdown: Bool = false,
                     decompression: Decompression = .disabled) {
             self.tlsConfiguration = tlsConfiguration
+            self.hostnameRepresentations = hostnameRepresentations
             self.redirectConfiguration = redirectConfiguration ?? RedirectConfiguration()
             self.timeout = timeout
             self.maximumAllowedIdleTimeInConnectionPool = maximumAllowedIdleTimeInConnectionPool
@@ -461,6 +472,7 @@ public class HTTPClient {
         }
 
         public init(tlsConfiguration: TLSConfiguration? = nil,
+                    hostnameRepresentations: HostnameRepresentationResolver = .default,
                     redirectConfiguration: RedirectConfiguration? = nil,
                     timeout: Timeout = Timeout(),
                     proxy: Proxy? = nil,
@@ -468,6 +480,7 @@ public class HTTPClient {
                     decompression: Decompression = .disabled) {
             self.init(
                 tlsConfiguration: tlsConfiguration,
+                hostnameRepresentations: hostnameRepresentations,
                 redirectConfiguration: redirectConfiguration,
                 timeout: timeout,
                 maximumAllowedIdleTimeInConnectionPool: .seconds(60),
@@ -478,6 +491,7 @@ public class HTTPClient {
         }
 
         public init(certificateVerification: CertificateVerification,
+                    hostnameRepresentations: HostnameRepresentationResolver = .default,
                     redirectConfiguration: RedirectConfiguration? = nil,
                     timeout: Timeout = Timeout(),
                     maximumAllowedIdleTimeInConnectionPool: TimeAmount = .seconds(60),
@@ -485,6 +499,7 @@ public class HTTPClient {
                     ignoreUncleanSSLShutdown: Bool = false,
                     decompression: Decompression = .disabled) {
             self.tlsConfiguration = TLSConfiguration.forClient(certificateVerification: certificateVerification)
+            self.hostnameRepresentations = hostnameRepresentations
             self.redirectConfiguration = redirectConfiguration ?? RedirectConfiguration()
             self.timeout = timeout
             self.maximumAllowedIdleTimeInConnectionPool = maximumAllowedIdleTimeInConnectionPool
@@ -494,6 +509,7 @@ public class HTTPClient {
         }
 
         public init(certificateVerification: CertificateVerification,
+                    hostnameRepresentations: HostnameRepresentationResolver = .default,
                     redirectConfiguration: RedirectConfiguration? = nil,
                     timeout: Timeout = Timeout(),
                     proxy: Proxy? = nil,
@@ -501,6 +517,7 @@ public class HTTPClient {
                     decompression: Decompression = .disabled) {
             self.init(
                 certificateVerification: certificateVerification,
+                hostnameRepresentations: hostnameRepresentations,
                 redirectConfiguration: redirectConfiguration,
                 timeout: timeout,
                 maximumAllowedIdleTimeInConnectionPool: .seconds(60),
@@ -637,6 +654,116 @@ extension HTTPClient.Configuration {
         /// - warning: Cycle detection will keep all visited URLs in memory which means a malicious server could use this as a denial-of-service vector.
         public static func follow(max: Int, allowCycles: Bool) -> RedirectConfiguration { return .init(configuration: .follow(max: max, allowCycles: allowCycles)) }
     }
+    
+    public struct HostnameRepresentationResolver {
+        public typealias Representation = String
+        
+        public enum RepresentationKey: Hashable {
+            case host(String)
+            case socketPath(String)
+        }
+        
+        public static let `default` = HostnameRepresentationResolver()
+        
+        private(set) public var overrides: [RepresentationKey : Representation]
+        
+        public init(overrides: [RepresentationKey : Representation] = [:]) {
+            self.overrides = overrides
+        }
+        
+        public init() {
+            self.init(overrides: [:])
+        }
+        
+        public init(hostOverrides: [String : Representation]) {
+            self.init(overrides: Dictionary(uniqueKeysWithValues: hostOverrides.map { (.host($0), $1) }))
+        }
+        
+        public init(socketPathOverrides: [String : Representation]) {
+            self.init(overrides: Dictionary(uniqueKeysWithValues: socketPathOverrides.map { (.socketPath($0), $1) }))
+        }
+        
+        public mutating func register(_ representation: Representation, for key: RepresentationKey) {
+            overrides[key] = representation
+        }
+        
+        public mutating func register(_ representation: Representation, forHost host: String) {
+            self.register(representation, for: .host(host))
+        }
+        
+        public mutating func register(_ representation: Representation, forSocketPath socketPath: String) {
+            self.register(representation, for: .socketPath(socketPath))
+        }
+        
+        public mutating func unregisterRepresentation(for key: RepresentationKey) {
+            overrides.removeValue(forKey: key)
+        }
+        
+        public mutating func unregisterRepresentation(forHost host: String) {
+            self.unregisterRepresentation(for: .host(host))
+        }
+        
+        public mutating func unregisterRepresentation(forSocketPath socketPath: String) {
+            self.unregisterRepresentation(for: .socketPath(socketPath))
+        }
+        
+        public func resolveHTTPHost(for key: RepresentationKey) -> String {
+            guard let representation = overrides[key] else {
+                switch key {
+                case .host(let host):
+                    return host
+                case .socketPath(_):
+                    return "localhost"
+                }
+            }
+            
+            return representation
+        }
+        
+        public func resolveSNI(for key: RepresentationKey) -> String? {
+            guard let representation = overrides[key] else {
+                switch key {
+                case .host(let host):
+                    if host.isIPAddress || host.isEmpty {
+                        return nil
+                    }
+                    return host
+                case .socketPath(_):
+                    return nil
+                }
+            }
+            
+            switch representation {
+            case .emptyRepresentation: return nil // empty representations should be represented as nil
+            case let host where host.isIPAddress: return nil // IP addresses should be represented as nil
+            default: return representation // the representation should be good to go
+            }
+        }
+    }
+}
+
+extension HTTPClient.Configuration.HostnameRepresentationResolver.Representation {
+    public static let emptyRepresentation = ""
+}
+
+extension HTTPClient.Configuration.HostnameRepresentationResolver {
+    func resolveHTTPHost(for request: HTTPClient.Request) -> String {
+        switch request.kind {
+        case .host:
+            return resolveHTTPHost(for: .host(request.host))
+        case .unixSocket:
+            return resolveHTTPHost(for: .socketPath(request.socketPath))
+        }
+    }
+    
+    func resolveSNI(for key: ConnectionPool.Key) -> String? {
+        switch key.scheme {
+        case .http, .https:
+            return resolveSNI(for: .host(key.host))
+        case .http_unix, .https_unix, .unix:
+            return resolveSNI(for: .socketPath(key.unixPath))
+        }
+    }
 }
 
 extension ChannelPipeline {
@@ -653,7 +780,7 @@ extension ChannelPipeline {
         return addHandlers([encoder, decoder, handler])
     }
 
-    func addSSLHandlerIfNeeded(for key: ConnectionPool.Key, tlsConfiguration: TLSConfiguration?, addSSLClient: Bool, handshakePromise: EventLoopPromise<Void>) {
+    func addSSLHandlerIfNeeded(for key: ConnectionPool.Key, configuration: HTTPClient.Configuration, addSSLClient: Bool, handshakePromise: EventLoopPromise<Void>) {
         guard key.scheme.requiresTLS else {
             handshakePromise.succeed(())
             return
@@ -662,10 +789,10 @@ extension ChannelPipeline {
         do {
             let handlers: [ChannelHandler]
             if addSSLClient {
-                let tlsConfiguration = tlsConfiguration ?? TLSConfiguration.forClient()
+                let tlsConfiguration = configuration.tlsConfiguration ?? TLSConfiguration.forClient()
                 let context = try NIOSSLContext(configuration: tlsConfiguration)
                 handlers = [
-                    try NIOSSLClientHandler(context: context, serverHostname: (key.host.isIPAddress || key.host.isEmpty) ? nil : key.host),
+                    try NIOSSLClientHandler(context: context, serverHostname: configuration.hostnameRepresentations.resolveSNI(for: key)),
                     TLSEventsHandler(completionPromise: handshakePromise),
                 ]
             } else {

@@ -54,7 +54,7 @@ public final class HTTPClientCopyingDelegate: HTTPClientResponseDelegate {
 
 extension ClientBootstrap {
     fileprivate func makeClientTCPBootstrap(
-        host: String,
+        host: String?,
         requiresTLS: Bool,
         configuration: HTTPClient.Configuration
     ) throws -> NIOClientTCPBootstrap {
@@ -64,7 +64,7 @@ extension ClientBootstrap {
         } else {
             let tlsConfiguration = configuration.tlsConfiguration ?? TLSConfiguration.forClient()
             let sslContext = try NIOSSLContext(configuration: tlsConfiguration)
-            let hostname = (!requiresTLS || host.isIPAddress || host.isEmpty) ? nil : host
+            let hostname = requiresTLS ? host : nil
             let tlsProvider = try NIOSSLClientTLSProvider<ClientBootstrap>(context: sslContext, serverHostname: hostname)
             return NIOClientTCPBootstrap(self, tls: tlsProvider)
         }
@@ -75,7 +75,7 @@ extension NIOClientTCPBootstrap {
     /// create a TCP Bootstrap based off what type of `EventLoop` has been passed to the function.
     fileprivate static func makeBootstrap(
         on eventLoop: EventLoop,
-        host: String,
+        host: String?,
         requiresTLS: Bool,
         configuration: HTTPClient.Configuration
     ) throws -> NIOClientTCPBootstrap {
@@ -116,11 +116,13 @@ extension NIOClientTCPBootstrap {
     static func makeHTTPClientBootstrapBase(
         on eventLoop: EventLoop,
         host: String,
+        preferredHostname: String?,
         port: Int,
         requiresTLS: Bool,
         configuration: HTTPClient.Configuration
     ) throws -> NIOClientTCPBootstrap {
-        return try self.makeBootstrap(on: eventLoop, host: host, requiresTLS: requiresTLS, configuration: configuration)
+        // use the preferred hostname for the TLS connection
+        return try self.makeBootstrap(on: eventLoop, host: preferredHostname, requiresTLS: requiresTLS, configuration: configuration)
             .channelOption(ChannelOptions.socket(SocketOptionLevel(IPPROTO_TCP), TCP_NODELAY), value: 1)
             .channelInitializer { channel in
                 let channelAddedFuture: EventLoopFuture<Void>
@@ -128,6 +130,7 @@ extension NIOClientTCPBootstrap {
                 case .none:
                     channelAddedFuture = eventLoop.makeSucceededFuture(())
                 case .some:
+                    // use the actual host for the proxy handler
                     channelAddedFuture = channel.pipeline.addProxyHandler(host: host, port: port, authorization: configuration.proxy?.authorization)
                 }
                 return channelAddedFuture

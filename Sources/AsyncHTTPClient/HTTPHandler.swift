@@ -179,10 +179,6 @@ extension HTTPClient {
         public let scheme: String
         /// Remote host, resolved from `URL`.
         public let host: String
-        /// Socket path, resolved from `URL`.
-        let socketPath: String
-        /// URI composed of the path and query, resolved from `URL`.
-        let uri: String
         /// Request custom HTTP Headers, defaults to no headers.
         public var headers: HTTPHeaders
         /// Request body, defaults to no body.
@@ -193,8 +189,15 @@ extension HTTPClient {
             var visited: Set<URL>?
         }
 
-        var redirectState: RedirectState?
+        // Internal properties
         let kind: Kind
+        /// Socket path, resolved from `URL`.
+        let socketPath: String
+        /// URI composed of the path and query, resolved from `URL`.
+        let uri: String
+        var redirectState: RedirectState?
+        /// The preferred hostname to use for the Host header. This will be filled in when the request is executed.
+        var preferredHostname: Configuration.HostnameRepresentationResolver.Representation = .emptyRepresentation
 
         /// Create HTTP request.
         ///
@@ -401,9 +404,9 @@ public class ResponseAccumulator: HTTPClientResponseDelegate {
         case .idle:
             preconditionFailure("no head received before end")
         case .head(let head):
-            return Response(host: self.request.host, status: head.status, version: head.version, headers: head.headers, body: nil)
+            return Response(host: self.request.preferredHostname, status: head.status, version: head.version, headers: head.headers, body: nil)
         case .body(let head, let body):
-            return Response(host: self.request.host, status: head.status, version: head.version, headers: head.headers, body: body)
+            return Response(host: self.request.preferredHostname, status: head.status, version: head.version, headers: head.headers, body: body)
         case .end:
             preconditionFailure("request already processed")
         case .error(let error):
@@ -757,7 +760,8 @@ extension TaskHandler: ChannelDuplexHandler {
         var headers = request.headers
 
         if !request.headers.contains(name: "Host") {
-            headers.add(name: "Host", value: request.host)
+            // Use the host override here?
+            headers.add(name: "Host", value: request.preferredHostname)
         }
 
         do {
